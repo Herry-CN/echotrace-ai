@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -19,6 +20,9 @@ import '../widgets/common/shimmer_loading.dart';
 import '../widgets/toast_overlay.dart';
 import '../utils/string_utils.dart';
 
+/// 快速选择模式
+enum _QuickSelectMode { none, all, groups, contacts, custom }
+
 /// 聊天记录导出页面
 class ChatExportPage extends StatefulWidget {
   const ChatExportPage({super.key});
@@ -33,7 +37,7 @@ class _ChatExportPageState extends State<ChatExportPage>
   List<ChatSession> _allSessions = [];
   Set<String> _selectedSessions = {};
   bool _isLoadingSessions = false;
-  bool _selectAll = false;
+  _QuickSelectMode _selectionMode = _QuickSelectMode.none;
   String _searchQuery = '';
   String _selectedFormat = 'json';
   DateTimeRange? _selectedRange;
@@ -97,7 +101,7 @@ class _ChatExportPageState extends State<ChatExportPage>
     if (value == _searchQuery) return;
     setState(() {
       _searchQuery = value;
-      _selectAll = false;
+      _updateSelectionMode();
     });
   }
 
@@ -319,7 +323,7 @@ class _ChatExportPageState extends State<ChatExportPage>
     // 清除已选会话，避免刷新后选中状态与新列表不匹配
     setState(() {
       _selectedSessions.clear();
-      _selectAll = false;
+      _selectionMode = _QuickSelectMode.none;
     });
     // 重新加载数据
     await _loadSessions();
@@ -370,28 +374,65 @@ class _ChatExportPageState extends State<ChatExportPage>
     return DateTimeRange(start: start, end: end);
   }
 
-  void _toggleSelectAll() {
+  void _applyQuickSelect(_QuickSelectMode mode) {
     setState(() {
-      _selectAll = !_selectAll;
-      if (_selectAll) {
-        _selectedSessions = _filteredSessions.map((s) => s.username).toSet();
-      } else {
-        _selectedSessions.clear();
+      switch (mode) {
+        case _QuickSelectMode.all:
+          _selectedSessions = _filteredSessions.map((s) => s.username).toSet();
+          break;
+        case _QuickSelectMode.groups:
+          _selectedSessions = _filteredSessions
+              .where((s) => s.isGroup)
+              .map((s) => s.username)
+              .toSet();
+          break;
+        case _QuickSelectMode.contacts:
+          _selectedSessions = _filteredSessions
+              .where((s) => !s.isGroup)
+              .map((s) => s.username)
+              .toSet();
+          break;
+        case _QuickSelectMode.none:
+          _selectedSessions.clear();
+          break;
+        case _QuickSelectMode.custom:
+          // 不手动设置 custom，由 _updateSelectionMode 决定
+          break;
       }
+      _updateSelectionMode();
     });
+  }
+
+  void _updateSelectionMode() {
+    final filtered = _filteredSessions.map((s) => s.username).toSet();
+    final groups =
+        _filteredSessions.where((s) => s.isGroup).map((s) => s.username).toSet();
+    final contacts = _filteredSessions
+        .where((s) => !s.isGroup)
+        .map((s) => s.username)
+        .toSet();
+
+    if (_selectedSessions.isEmpty) {
+      _selectionMode = _QuickSelectMode.none;
+    } else if (setEquals(_selectedSessions, filtered) && filtered.isNotEmpty) {
+      _selectionMode = _QuickSelectMode.all;
+    } else if (setEquals(_selectedSessions, groups) && groups.isNotEmpty) {
+      _selectionMode = _QuickSelectMode.groups;
+    } else if (setEquals(_selectedSessions, contacts) && contacts.isNotEmpty) {
+      _selectionMode = _QuickSelectMode.contacts;
+    } else {
+      _selectionMode = _QuickSelectMode.custom;
+    }
   }
 
   void _toggleSession(String username) {
     setState(() {
       if (_selectedSessions.contains(username)) {
         _selectedSessions.remove(username);
-        _selectAll = false;
       } else {
         _selectedSessions.add(username);
-        if (_selectedSessions.length == _filteredSessions.length) {
-          _selectAll = true;
-        }
       }
+      _updateSelectionMode();
     });
   }
 
@@ -934,17 +975,17 @@ class _ChatExportPageState extends State<ChatExportPage>
             ),
           ),
           const SizedBox(width: 24),
-          OutlinedButton.icon(
-            onPressed: _toggleSelectAll,
-            label: Text(_selectAll ? '重置选择' : '快速全选'),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
+          _buildSelectionOption(_QuickSelectMode.all, '快速全选'),
+          _buildSelectionOption(_QuickSelectMode.groups, '快速群全选'),
+          _buildSelectionOption(_QuickSelectMode.contacts, '快速联系人全选'),
+          if (_selectionMode != _QuickSelectMode.none)
+            IconButton(
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              onPressed: () => _applyQuickSelect(_QuickSelectMode.none),
+              tooltip: '重置选择',
+              color: Colors.grey.shade600,
             ),
-          ),
-          const SizedBox(width: 20),
+          const SizedBox(width: 12),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
@@ -962,6 +1003,44 @@ class _ChatExportPageState extends State<ChatExportPage>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSelectionOption(_QuickSelectMode mode, String label) {
+    final isSelected = _selectionMode == mode;
+    return InkWell(
+      onTap: () => _applyQuickSelect(mode),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: Radio<_QuickSelectMode>(
+                value: mode,
+                groupValue: _selectionMode,
+                onChanged: (v) => _applyQuickSelect(v!),
+                activeColor: Theme.of(context).colorScheme.primary,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.grey.shade700,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
